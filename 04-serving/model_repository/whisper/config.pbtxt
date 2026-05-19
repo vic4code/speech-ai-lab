@@ -1,0 +1,51 @@
+# Triton model configuration for Whisper large-v3
+# Deployed as a Python backend (custom inference logic)
+# See: https://github.com/triton-inference-server/python_backend
+
+name: "whisper"
+backend: "python"
+max_batch_size: 8
+
+input [
+  {
+    name: "audio_signal"
+    data_type: TYPE_FP32
+    dims: [ -1 ]   # variable-length audio waveform (samples)
+  },
+  {
+    name: "sample_rate"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  }
+]
+
+output [
+  {
+    name: "transcription"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [ 1, 4, 8 ]
+  max_queue_delay_microseconds: 5000
+}
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+parameters {
+  key: "model_name"
+  value: { string_value: "large-v3" }
+}
+
+parameters {
+  key: "compute_type"
+  value: { string_value: "float16" }
+}
