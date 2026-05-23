@@ -23,17 +23,43 @@ Each phase is self-contained, documented, and benchmarked against real hardware 
 
 ## Results (Phase 3 — Inference Optimization)
 
-> Run on AWS `g5.xlarge` (NVIDIA A10G 24 GB) · Whisper large-v3 · 5.1 s LibriSpeech clip
+### Hardware & Methodology
 
-| Backend | Precision | P50 Latency (ms) | P95 Latency (ms) | GPU Mem (MB) | CER | Speedup |
-|---------|-----------|:----------------:|:----------------:|:------------:|:---:|:-------:|
-| PyTorch | FP32 | — | — | — | — | 1.00× |
-| PyTorch | FP16 | — | — | — | — | —× |
-| CTranslate2 | float16 | — | — | — | — | —× |
-| CTranslate2 | int8\_float16 | — | — | — | — | —× |
-| CTranslate2 | int8 | — | — | — | — | —× |
+> GPU: NVIDIA A10G 24 GB · CUDA 12.1 · Python 3.12 · PyTorch 2.5.1  
+> Benchmark: 3 warmup iters (discarded) + 5 timed iters per model, CUDA-synchronised wall-clock  
+> Data: 100 utterances each from FLEURS `cmn_hans_cn` (zh, avg 11.0 s/clip) and LibriSpeech test-clean (en, avg 6.7 s/clip)  
+> Metrics: CER for Chinese, WER for English; RTF = mean\_latency\_ms / audio\_duration\_ms
 
-*Fill in after running Phase 3 scripts — see [How to Run](#how-to-run).*
+### Baseline — FP32 (Phase 3, Step 1)
+
+#### English (Whisper vs Parakeet)
+
+| Model | Backend | Mean (ms) | P95 (ms) | GPU Mem (MB) | RTF | WER% | Speedup vs v3 |
+|-------|---------|:---------:|:--------:|:------------:|:---:|:----:|:-------------:|
+| whisper-large-v3 | openai-whisper FP32 | 1130.4 | 1946.8 | 6607.8 | 0.169 | 2.35 | 1.00× |
+| whisper-large-v3-turbo | openai-whisper FP32 | 370.2 | 509.0 | 3250.6 | 0.055 | 2.51 | **3.05×** |
+| parakeet-tdt-1.1b | NeMo FP32 | **128.4** | 168.6 | 4506.8 | **0.019** | **1.60** | **8.80×** |
+
+#### Chinese (Whisper only — Parakeet is English-only)
+
+| Model | Backend | Mean (ms) | P95 (ms) | GPU Mem (MB) | RTF | CER% | Speedup vs v3 |
+|-------|---------|:---------:|:--------:|:------------:|:---:|:----:|:-------------:|
+| whisper-large-v3 | openai-whisper FP32 | 1378.7 | 2326.2 | 6547.5 | 0.125 | **4.14** | 1.00× |
+| whisper-large-v3-turbo | openai-whisper FP32 | 404.0 | 575.3 | 3250.6 | 0.037 | 5.40 | **3.41×** |
+
+### Key Takeaways (Baseline)
+
+- **Parakeet TDT 1.1B is 8.8× faster than Whisper large-v3** on English, with *better* WER (1.6% vs 2.35%) — Parakeet uses CTC/TDT decoding (linear) vs Whisper's autoregressive beam search (quadratic in output length).
+- **whisper-large-v3-turbo** offers a good trade-off: 3× speedup over large-v3, only +0.16 pp WER on English. Chinese CER degrades more noticeably (+1.26 pp), so large-v3 is preferred for zh.
+- **GPU memory**: turbo uses 48% less VRAM than large-v3 (3.2 GB vs 6.6 GB), enabling deployment on smaller GPUs.
+
+### Optimization Roadmap (Steps 2–4)
+
+| Step | Technique | Script | Expected gain |
+|------|-----------|--------|--------------|
+| 2 | FP16 (Whisper amp) | `02_fp16_benchmark.py` | ~2× latency, negligible accuracy loss |
+| 3 | CTranslate2 INT8/int8\_float16 (faster-whisper) | `03_int8_ctranslate2.py` | ~4× vs FP32, <0.5 pp CER |
+| 4 | torch.compile + TensorRT backend | `04_tensorrt_compile.py` | additional 10–30% on top of INT8 |
 
 ---
 
