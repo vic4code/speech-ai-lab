@@ -44,6 +44,7 @@ checkpoints/
 data/sample_audio/*.wav
 data/sample_audio/*.mp3
 data/sample_audio/*.flac
+data/benchmark/
 
 # Results / outputs (keep JSONs via explicit add)
 results/*.json

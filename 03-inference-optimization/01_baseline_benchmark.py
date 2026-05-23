@@ -1,140 +1,315 @@
 """
-Baseline FP32 Whisper inference benchmark on CUDA.
+Baseline FP32 inference benchmark.
 
-What this measures
-------------------
-End-to-end transcription latency for Whisper tiny and large-v3 in full
-FP32 precision.  We measure wall-clock time between CUDA synchronization
-points so that kernel execution — not Python overhead — is captured.
+Models tested
+-------------
+zh (Chinese, Whisper-only — Parakeet is English-only):
+  - openai/whisper-large-v3          FP32, openai-whisper
+  - openai/whisper-large-v3-turbo    FP32, openai-whisper
 
-Why warmup matters
-------------------
-The first N CUDA kernel launches carry JIT compilation overhead (PTX → SASS)
-and driver setup costs that are not representative of steady-state throughput.
-Running 10 un-timed warmup iterations brings the GPU into its thermal and
-clock steady state and ensures the CUDA kernel cache is populated before
-measurement begins.
+en (English, head-to-head):
+  - openai/whisper-large-v3          FP32, openai-whisper
+  - openai/whisper-large-v3-turbo    FP32, openai-whisper
+  - nvidia/parakeet-tdt-1.1b         FP32, NeMo
 
-Why ASR inference is memory-bound
-----------------------------------
-Transformer inference at batch-size 1 is dominated by reading weight matrices
-from HBM into CUDA cores for each matrix-vector multiply.  Arithmetic
-intensity (FLOPs / bytes) is too low to saturate the tensor cores, so
-throughput scales with HBM bandwidth, not FLOP/s.  This is the central
-motivation for quantization: INT8 weights are half the bytes of FP16,
-doubling the effective bandwidth for weight loads.
+Metrics
+-------
+  Mean / P50 / P95 latency (ms), GPU memory peak (MB), WER/CER, RTF
+  WER for English, CER for Chinese.
+  RTF = mean_latency_ms / audio_duration_ms
+
+Output
+------
+  results/baseline_results.json
 """
 
 import json
+import re
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
-import whisper
-from datasets import load_dataset
 from rich.console import Console
 from rich.table import Table
 
+warnings.filterwarnings("ignore")
+
 console = Console()
 
-WARMUP_ITERS = 10
-BENCH_ITERS = 10
-RESULTS_DIR = Path("results")
-OUTPUT_FILE = RESULTS_DIR / "baseline_results.json"
-
-MODELS = ["tiny", "large-v3"]
-
-
-def get_test_audio() -> np.ndarray:
-    """Download one audio clip from librispeech_asr_dummy and return as float32 numpy array."""
-    console.print("Downloading test audio from librispeech_asr_dummy ...")
-    ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation[:1]")
-    audio: np.ndarray = np.array(ds[0]["audio"]["array"], dtype=np.float32)
-    console.print(f"Audio loaded: {len(audio)/ds[0]['audio']['sampling_rate']:.2f}s")
-    return audio
+WARMUP = 3
+BENCH_ITERS = 5
+RESULTS_DIR = Path(__file__).parent.parent / "results"
+MANIFEST_ZH = Path(__file__).parent.parent / "data" / "benchmark" / "zh" / "manifest.json"
+MANIFEST_EN = Path(__file__).parent.parent / "data" / "benchmark" / "en" / "manifest.json"
 
 
-def benchmark_model(model_name: str, audio: np.ndarray) -> dict[str, Any]:
-    """Load model in FP32, run warmup then timed iterations, return latency + memory stats."""
+# ---------------------------------------------------------------------------
+# Audio loading
+# ---------------------------------------------------------------------------
+
+def load_manifest(path: Path) -> list[dict]:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Manifest not found: {path}\n"
+            "Run: python 00_prepare_data.py"
+        )
+    return json.loads(path.read_text())
+
+
+def load_audio_numpy(audio_path: str, target_sr: int = 16_000) -> np.ndarray:
+    import librosa
+    audio, _ = librosa.load(audio_path, sr=target_sr, mono=True)
+    return audio.astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Normalisation for WER/CER
+# ---------------------------------------------------------------------------
+
+def normalise_zh(text: str) -> str:
+    """Strip spaces and punctuation for Chinese CER."""
+    text = re.sub(r"[^一-鿿㐀-䶿＀-￯]", "", text)
+    return text.strip()
+
+
+def normalise_en(text: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9\s]", "", text).lower().strip()
+
+
+# ---------------------------------------------------------------------------
+# WER / CER helpers
+# ---------------------------------------------------------------------------
+
+def compute_wer(refs: list[str], hyps: list[str]) -> float:
+    from jiwer import wer
+    return round(wer(refs, hyps) * 100, 2)
+
+
+def compute_cer(refs: list[str], hyps: list[str]) -> float:
+    from jiwer import cer
+    return round(cer(refs, hyps) * 100, 2)
+
+
+# ---------------------------------------------------------------------------
+# Benchmark helpers
+# ---------------------------------------------------------------------------
+
+def _reset_gpu(device: str) -> None:
+    if device == "cuda":
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+
+
+def _peak_gpu_mb(device: str) -> float:
+    if device == "cuda":
+        return round(torch.cuda.max_memory_allocated() / 1024**2, 1)
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Whisper (openai-whisper)
+# ---------------------------------------------------------------------------
+
+def bench_whisper(model_name: str, manifest: list[dict], lang: str) -> dict[str, Any]:
+    import whisper as ow
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    console.print(f"\n[bold cyan]Benchmarking Whisper {model_name} (FP32) on {device}[/bold cyan]")
+    console.print(f"\n[bold cyan]Whisper {model_name} FP32 [{lang}] on {device}[/bold cyan]")
 
-    model = whisper.load_model(model_name, device=device)
+    model = ow.load_model(model_name, device=device)
     model.eval()
 
-    torch.cuda.reset_peak_memory_stats(device)
+    audios = [load_audio_numpy(m["audio_path"]) for m in manifest]
+    refs_raw = [m["reference"] for m in manifest]
 
-    # --- Warmup: not timed ---
-    console.print(f"  Running {WARMUP_ITERS} warmup iterations ...")
-    for _ in range(WARMUP_ITERS):
+    # Warmup
+    console.print(f"  warmup {WARMUP} iters …")
+    for a in audios[:WARMUP]:
         with torch.no_grad():
-            model.transcribe(audio, language="en", fp16=False)
+            model.transcribe(a, language=lang, fp16=False)
 
-    # --- Benchmark ---
-    console.print(f"  Running {BENCH_ITERS} benchmark iterations ...")
-    latencies_ms: list[float] = []
+    _reset_gpu(device)
+    latencies: list[float] = []
 
-    for i in range(BENCH_ITERS):
-        torch.cuda.synchronize()
+    console.print(f"  benchmarking {BENCH_ITERS} iters …")
+    for a in audios[:BENCH_ITERS]:
+        if device == "cuda":
+            torch.cuda.synchronize()
         t0 = time.perf_counter()
-
         with torch.no_grad():
-            result = model.transcribe(audio, language="en", fp16=False)
+            model.transcribe(a, language=lang, fp16=False)
+        if device == "cuda":
+            torch.cuda.synchronize()
+        latencies.append((time.perf_counter() - t0) * 1000)
 
-        torch.cuda.synchronize()
-        t1 = time.perf_counter()
-        latencies_ms.append((t1 - t0) * 1000)
-        console.print(f"    iter {i+1:02d}: {latencies_ms[-1]:.1f} ms")
+    # Full accuracy pass over all samples
+    all_hyps: list[str] = []
+    for a in audios:
+        with torch.no_grad():
+            r = model.transcribe(a, language=lang, fp16=False)
+        all_hyps.append(r["text"].strip())
 
-    gpu_mem_mb = torch.cuda.max_memory_allocated(device) / (1024**2)
+    del model
+    torch.cuda.empty_cache()
+
+    avg_dur = np.mean([m["duration_s"] for m in manifest]) * 1000
+    if lang == "zh":
+        norm_refs = [normalise_zh(r) for r in refs_raw]
+        norm_hyps = [normalise_zh(h) for h in all_hyps]
+        error = compute_cer(norm_refs, norm_hyps)
+        error_label = "CER%"
+    else:
+        norm_refs = [normalise_en(r) for r in refs_raw]
+        norm_hyps = [normalise_en(h) for h in all_hyps]
+        error = compute_wer(norm_refs, norm_hyps)
+        error_label = "WER%"
 
     return {
-        "model": model_name,
+        "model": f"whisper-{model_name}",
+        "backend": "openai-whisper",
         "precision": "fp32",
-        "mean_latency_ms": round(float(np.mean(latencies_ms)), 2),
-        "p95_latency_ms": round(float(np.percentile(latencies_ms, 95)), 2),
-        "gpu_memory_mb": round(gpu_mem_mb, 1),
-        "transcription_sample": result["text"].strip(),
+        "lang": lang,
+        "mean_ms": round(float(np.mean(latencies)), 1),
+        "p50_ms": round(float(np.percentile(latencies, 50)), 1),
+        "p95_ms": round(float(np.percentile(latencies, 95)), 1),
+        "gpu_mb": _peak_gpu_mb(device),
+        "rtf": round(float(np.mean(latencies)) / avg_dur, 4),
+        error_label: error,
+        "sample_hyp": all_hyps[0][:120],
     }
 
 
-def print_results_table(results: list[dict[str, Any]]) -> None:
-    table = Table(title="Baseline FP32 Benchmark Results")
+# ---------------------------------------------------------------------------
+# Parakeet TDT 1.1B (NeMo) — English only
+# ---------------------------------------------------------------------------
+
+def bench_parakeet(manifest: list[dict]) -> dict[str, Any]:
+    import nemo.collections.asr as nemo_asr
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    console.print(f"\n[bold cyan]Parakeet TDT 1.1B FP32 [en] on {device}[/bold cyan]")
+
+    model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-1.1b")
+    model = model.to(device)
+    model.eval()
+
+    audio_paths = [m["audio_path"] for m in manifest]
+    refs_raw = [m["reference"] for m in manifest]
+
+    # Warmup
+    console.print(f"  warmup {WARMUP} iters …")
+    for p in audio_paths[:WARMUP]:
+        with torch.no_grad():
+            model.transcribe([p])
+
+    _reset_gpu(device)
+    latencies: list[float] = []
+
+    console.print(f"  benchmarking {BENCH_ITERS} iters …")
+    for p in audio_paths[:BENCH_ITERS]:
+        if device == "cuda":
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            model.transcribe([p])
+        if device == "cuda":
+            torch.cuda.synchronize()
+        latencies.append((time.perf_counter() - t0) * 1000)
+
+    # Full accuracy pass
+    with torch.no_grad():
+        results = model.transcribe(audio_paths)
+    all_hyps = [r.text if hasattr(r, "text") else str(r) for r in results]
+
+    del model
+    torch.cuda.empty_cache()
+
+    avg_dur = np.mean([m["duration_s"] for m in manifest]) * 1000
+    norm_refs = [normalise_en(r) for r in refs_raw]
+    norm_hyps = [normalise_en(h) for h in all_hyps]
+    wer = compute_wer(norm_refs, norm_hyps)
+
+    return {
+        "model": "parakeet-tdt-1.1b",
+        "backend": "nemo",
+        "precision": "fp32",
+        "lang": "en",
+        "mean_ms": round(float(np.mean(latencies)), 1),
+        "p50_ms": round(float(np.percentile(latencies, 50)), 1),
+        "p95_ms": round(float(np.percentile(latencies, 95)), 1),
+        "gpu_mb": _peak_gpu_mb(device),
+        "rtf": round(float(np.mean(latencies)) / avg_dur, 4),
+        "WER%": wer,
+        "sample_hyp": all_hyps[0][:120],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pretty table
+# ---------------------------------------------------------------------------
+
+def print_table(results: list[dict]) -> None:
+    table = Table(title="Baseline FP32 Benchmark", show_lines=True)
     table.add_column("Model", style="bold")
-    table.add_column("Precision")
-    table.add_column("Mean Latency (ms)", justify="right")
-    table.add_column("P95 Latency (ms)", justify="right")
-    table.add_column("GPU Mem (MB)", justify="right")
+    table.add_column("Lang")
+    table.add_column("Backend")
+    table.add_column("Mean (ms)", justify="right")
+    table.add_column("P95 (ms)", justify="right")
+    table.add_column("GPU MB", justify="right")
+    table.add_column("RTF", justify="right")
+    table.add_column("WER/CER %", justify="right")
 
     for r in results:
+        err = r.get("WER%") or r.get("CER%") or "—"
         table.add_row(
-            r["model"],
-            r["precision"].upper(),
-            f"{r['mean_latency_ms']:.1f}",
-            f"{r['p95_latency_ms']:.1f}",
-            f"{r['gpu_memory_mb']:.0f}",
+            r["model"], r["lang"], r["backend"],
+            str(r["mean_ms"]), str(r["p95_ms"]),
+            str(r["gpu_mb"]), str(r["rtf"]),
+            str(err),
         )
     console.print(table)
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main() -> None:
+    console.rule("[bold]Baseline FP32 Benchmark[/bold]")
+
     if not torch.cuda.is_available():
-        console.print("[yellow]WARNING: CUDA not available — running on CPU, timings not representative[/yellow]")
+        console.print("[yellow]WARNING: CUDA not available — latencies will not be representative[/yellow]")
 
-    audio = get_test_audio()
-    results: list[dict[str, Any]] = []
+    results: list[dict] = []
 
-    for model_name in MODELS:
-        stats = benchmark_model(model_name, audio)
-        results.append(stats)
+    # ----- Chinese: Whisper only -----
+    manifest_zh = load_manifest(MANIFEST_ZH)
+    for model_name in ["large-v3", "large-v3-turbo"]:
+        r = bench_whisper(model_name, manifest_zh, lang="zh")
+        results.append(r)
+        console.print(f"  → CER {r.get('CER%')}%  mean {r['mean_ms']} ms")
 
-    print_results_table(results)
+    # ----- English: Whisper + Parakeet -----
+    manifest_en = load_manifest(MANIFEST_EN)
+    for model_name in ["large-v3", "large-v3-turbo"]:
+        r = bench_whisper(model_name, manifest_en, lang="en")
+        results.append(r)
+        console.print(f"  → WER {r.get('WER%')}%  mean {r['mean_ms']} ms")
+
+    r = bench_parakeet(manifest_en)
+    results.append(r)
+    console.print(f"  → WER {r.get('WER%')}%  mean {r['mean_ms']} ms")
+
+    # ----- Output -----
+    print_table(results)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT_FILE.write_text(json.dumps(results, indent=2))
-    console.print(f"\n[green]Results saved → {OUTPUT_FILE}[/green]")
+    out = RESULTS_DIR / "baseline_results.json"
+    out.write_text(json.dumps(results, ensure_ascii=False, indent=2))
+    console.print(f"\n[green]Results saved → {out}[/green]")
 
 
 if __name__ == "__main__":
