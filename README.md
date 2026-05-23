@@ -97,6 +97,30 @@ Each phase is self-contained, documented, and benchmarked against real hardware 
 
 ---
 
+### Step 4 — torch.compile + TensorRT Encoder
+
+`torch.compile(backend="torch_tensorrt")` compiles the Whisper **encoder** with TRT kernel fusion + FP16 precision. The autoregressive **decoder** stays in eager mode (dynamic sequence lengths are incompatible with static TRT engine shapes).
+
+Engine build occurs on the first warmup call (~34 s for large-v3, ~0.3 s for large-v3-turbo after caching).
+
+#### large-v3
+
+| Lang | Mean (ms) | P95 (ms) | GPU MB | RTF | WER/CER% | vs FP32 |
+|---|---:|---:|---:|---:|---:|---:|
+| zh | 1245.5 | 2112.0 | 6547 | 0.0997 | 4.14% CER | 1.25× |
+| en | 1022.9 | 1769.0 | 6543 | 0.0982 | 2.78% WER | 1.72× |
+
+#### large-v3-turbo
+
+| Lang | Mean (ms) | P95 (ms) | GPU MB | RTF | WER/CER% | vs FP32 |
+|---|---:|---:|---:|---:|---:|---:|
+| zh | 342.7 | 508.0 | 3242 | 0.0282 | 5.40% CER | 1.31× |
+| en | 303.9 | 434.7 | 3240 | 0.0340 | 2.51% WER | 1.62× |
+
+> **Why TRT encoder-only is slower than CT2 INT8**: TRT fuses and tunes the encoder, but the autoregressive decoder remains the bottleneck for large-v3 (many decoder steps for long clips). CT2 INT8 quantizes the *entire* model (encoder + decoder weights) and achieves 2.17–2.72× vs TRT's 1.25–1.72×. TRT wins when the encoder is the dominant cost — e.g., encoder-heavy models or batch > 1.
+
+---
+
 ### Full Picture — whisper-large-v3, best backend per precision
 
 | Step | Precision | Lang | Mean (ms) | RTF | WER/CER% | Speedup |
@@ -104,10 +128,12 @@ Each phase is self-contained, documented, and benchmarked against real hardware 
 | 1 | FP32 (openai-whisper) | en | 1130 | 0.169 | 2.35% WER | 1.00× |
 | 2 | float16 (faster-whisper) | en | 637 | 0.068 | 2.57% | 2.48× |
 | 3 | int8\_float16 (faster-whisper) | en | 585 | 0.062 | 3.16% | **2.72×** |
+| 4 | fp16 TRT encoder (torch.compile) | en | 1023 | 0.098 | 2.78% | 1.72× |
 | — | *parakeet-tdt-1.1b FP32* | en | 128 | 0.019 | 1.60% | *8.80×* |
 | 1 | FP32 (openai-whisper) | zh | 1379 | 0.125 | 4.14% CER | 1.00× |
 | 2 | float16 (faster-whisper) | zh | 761 | 0.062 | 4.08% | 2.02× |
 | 3 | int8\_float16 (faster-whisper) | zh | 707 | 0.057 | 4.02% | **2.17×** |
+| 4 | fp16 TRT encoder (torch.compile) | zh | 1246 | 0.100 | 4.14% | 1.25× |
 
 ---
 
@@ -123,11 +149,9 @@ Each phase is self-contained, documented, and benchmarked against real hardware 
 
 5. **Chinese quantization is remarkably stable**: int8\_float16 CER 4.02% = slightly *better* than FP32 4.14% — quantization noise and greedy decoding differences fall within run-to-run variance.
 
-6. **Roofline explains everything**: at batch=1, ASR arithmetic intensity ≈ 0.5 FLOP/byte, 100× below the A10G ridge (52 FLOP/byte for FP32). Every optimization is a bandwidth reduction, not a compute increase.
+6. **TRT encoder-only < CT2 INT8 for this workload**: torch.compile/TRT achieves 1.25–1.72× (encoder fusion only) vs CT2's 2.17–2.72× (full model INT8). The decoder is the bottleneck at batch=1. TRT advantage emerges at batch > 1 or with encoder-only architectures.
 
-### Next Step — TensorRT (Step 4)
-
-`04_tensorrt_compile.py` — `torch.compile` with TensorRT backend on top of INT8, targeting an additional 15–30% kernel-fusion gain on the A10G.
+7. **Roofline explains everything**: at batch=1, ASR arithmetic intensity ≈ 0.5 FLOP/byte, 100× below the A10G ridge (52 FLOP/byte for FP32). Every optimization is a bandwidth reduction, not a compute increase.
 
 ---
 
