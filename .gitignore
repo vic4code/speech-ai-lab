@@ -62,9 +62,13 @@ results/*.json
 
 # NVIDIA / CUDA profiling
 *.nsys-rep
+*.ncu-rep
 *.qdrep
 *.nvvp
 *.sqlite
+
+# Claude Code internals
+.claude/
 
 # TensorRT
 *.trt

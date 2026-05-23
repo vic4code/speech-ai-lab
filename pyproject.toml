@@ -1,0 +1,33 @@
+[project]
+name = "speech-ai-lab"
+version = "0.1.0"
+description = "Speech AI inference optimization experiments: Whisper vs Parakeet on NVIDIA GPU"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "openai-whisper",
+    "faster-whisper",
+    "datasets",
+    "soundfile",
+    "librosa",
+    "numpy",
+    "jiwer",
+    "rich",
+    "nvidia-ml-py3",
+    "huggingface-hub",
+]
+
+[project.optional-dependencies]
+# 安裝 Parakeet: uv sync --extra parakeet
+parakeet = [
+    "nemo_toolkit[asr]",
+]
+
+[tool.uv]
+# torch + torchaudio 從 PyTorch CUDA 12.1 index 抓
+extra-index-url = ["https://download.pytorch.org/whl/cu121"]
+
+[tool.uv.workspace]
+members = [
+    "03-inference-optimization",
+]

@@ -287,6 +287,65 @@ Script: `07_cuda_graphs.py`
 
 ---
 
+### Step 9 — Nsight Compute Roofline Profiling
+
+Script: `09_nsight_roofline.py`
+
+Nsight Compute (`ncu`) replays each CUDA kernel with hardware performance counters to collect:
+- **Achieved FLOPs** — FP32 FMAs (`×2` per inst) + FP16 FMAs (`×4` per inst)
+- **DRAM bytes** — L2 → DRAM traffic per kernel invocation  
+- **Kernel duration** — microsecond-resolution GPU timer
+
+From these, per-kernel **arithmetic intensity** (FLOP/byte) and **achieved throughput** (TFLOPS) are derived and plotted against the A10G hardware ceilings.
+
+#### How to run
+
+```bash
+# Requires sudo for hardware counter access on AWS EC2
+sudo /usr/local/cuda/bin/ncu \
+  --set roofline \
+  --target-processes all \
+  --launch-skip 10 --launch-count 100 \
+  --force-overwrite \
+  -o results/ncu_encoder \
+  /home/ubuntu/speech-ai-lab/03-inference-optimization/.venv/bin/python \
+  09_nsight_roofline.py --target
+
+# Export CSV and generate per-kernel plot
+ncu --import results/ncu_encoder.ncu-rep --page raw --csv > results/ncu_encoder.csv
+python 09_nsight_roofline.py --plot results/ncu_encoder.ncu-rep
+
+# Estimated roofline from Steps 1–8 data (no ncu required)
+python 09_nsight_roofline.py --estimate
+```
+
+#### Per-kernel ncu results — input preprocessing window
+
+With `--launch-skip 10 --launch-count 100`, ncu captured the **input data preprocessing kernels** (mel spectrogram → FP16 dtype conversion) that execute at the start of the encoder forward pass.
+
+| Kernel type | Count | AI (FLOP/byte) | Achieved BW | Duration |
+|---|---:|---:|---:|---:|
+| `elementwise_kernel` (dtype copy) | 100 | ≈ 0.001 | ~364 GB/s | ~0.1 ms |
+
+These kernels are deeply memory-bound (AI ≈ 0.001 FLOP/byte vs A10G ridge at 52 FLOP/byte) and achieve **~60% of peak memory bandwidth** (364 / 600 GB/s) — well-optimised for a copy kernel.
+
+> To capture GEMM / attention kernels, increase `--launch-skip` to ≥ 500 to skip past the input preprocessing window. Those kernels are expected to land in the compute-bound region (AI ≫ 208 FLOP/byte), consistent with the Step 8 batch throughput analysis.
+
+#### Estimated roofline — encoder vs decoder operating points
+
+The estimated roofline (derived from Steps 1–8 measurements) shows the two operating regimes:
+
+| Component | AI (FLOP/byte) | vs A10G FP32 ridge | Region |
+|---|---:|---:|---|
+| Encoder (FP32, B=1) | 708 | 3.4× above ridge | **compute-bound** |
+| Decoder (FP32, B=1) | 0.5 | 100× below ridge | **memory-bound** |
+
+The encoder sits well into the compute-bound plateau — **tensor core throughput** (FP16: 125 TFLOPS, 4×) is the lever. The decoder sits on the memory-bound slope — **weight byte reduction** (FP32→INT8) gives proportional speedup.
+
+> **ERR_NVGPUCTRPERM note**: AWS EC2 requires `sudo ncu` for hardware performance counter access. Setting `perf_event_paranoid=0` alone is insufficient — the NVIDIA kernel module requires root privileges on cloud instances.
+
+---
+
 ## Full Stack Comparison — whisper-large-v3
 
 | Step | Technique | Lang | RTF | WER/CER% | vs FP32 |
@@ -353,7 +412,7 @@ uv sync   # or: pip install -r requirements.lock
 # Step 0: download benchmark data (FLEURS zh + LibriSpeech en, 100 clips each)
 python 00_prepare_data.py
 
-# Step 1–7: run in order
+# Steps 1–9: run in order
 python 01_baseline_benchmark.py     # → results/baseline_results.json
 python 02_fp16_benchmark.py         # → results/fp16_results.json
 python 03_int8_ctranslate2.py       # → results/int8_results.json
@@ -361,4 +420,16 @@ python 04_tensorrt_compile.py       # → results/tensorrt_results.json
 python 05_ct2_beam_vad.py           # → results/ct2_beam_vad_results.json
 python 06_tensorrt_int8.py          # → results/trt_int8_results.json
 python 07_cuda_graphs.py            # → results/cuda_graph_results.json
+python 08_batch_throughput.py       # → results/batch_throughput_results.json
+
+# Step 9: Nsight Compute roofline (requires sudo on AWS EC2)
+sudo /usr/local/cuda/bin/ncu \
+  --set roofline --target-processes all \
+  --launch-skip 10 --launch-count 100 --force-overwrite \
+  -o results/ncu_encoder \
+  $(which python) 09_nsight_roofline.py --target
+python 09_nsight_roofline.py --plot results/ncu_encoder.ncu-rep  # → results/roofline_ncu.png
+
+# Step 9 (no ncu — estimated from Steps 1–8 data):
+python 09_nsight_roofline.py --estimate                           # → results/roofline_estimated.png
 ```

@@ -96,14 +96,22 @@ def run_target() -> None:
 # ---------------------------------------------------------------------------
 
 def parse_ncu_csv(csv_path: Path) -> list[dict]:
-    """Parse ncu --csv output into a list of kernel dicts."""
+    """
+    Parse ncu --page raw --csv output.
+
+    ncu wide-format CSV layout:
+      Row 0: column headers
+      Row 1: units (e.g., 'us', 'inst', 'Gbyte/s') — must be stripped
+      Rows 2+: one kernel per row
+    """
     import csv
     kernels = []
     with open(csv_path, newline="", encoding="utf-8-sig") as f:
-        # ncu csv has a few header comment lines starting with "=="
         lines = [l for l in f if not l.startswith("==")]
         reader = csv.DictReader(lines)
-        for row in reader:
+        for i, row in enumerate(reader):
+            if i == 0:
+                continue  # skip units row
             kernels.append(dict(row))
     return kernels
 
@@ -111,28 +119,49 @@ def parse_ncu_csv(csv_path: Path) -> list[dict]:
 def extract_roofline_points(kernels: list[dict]) -> list[dict]:
     """
     Pull arithmetic intensity and throughput from ncu kernel rows.
-    ncu --set roofline emits columns like:
-      'Metric Name', 'Metric Value'  (long format)
-    or wide format depending on version.  We handle both.
+
+    ncu --set roofline --csv emits wide format (one row per kernel).
+    Row 0 is the units row — must be stripped before calling this function.
+
+    Column mapping (ncu 2026.1 / CUDA 12):
+      gpu__time_duration.sum                                → duration (us)
+      derived__sm__sass_thread_inst_executed_op_ffma_pred_on_x2  → FP32 FLOPs (already ×2)
+      derived__sm__sass_thread_inst_executed_op_hfma_pred_on_x4  → FP16 FLOPs (already ×4)
+      dram__bytes.sum.per_second                            → DRAM BW (Gbyte/s)
+      dram_bytes_total = bw_gbytes_per_s × 1e9 × duration_s
     """
     points = []
-    # Try wide format first (one row per kernel, many metric columns)
-    if kernels and "gpu__time_duration.sum" in kernels[0]:
-        for k in kernels:
-            try:
-                name = k.get("Kernel Name", k.get("ID", "unknown"))
-                duration_ns = float(k.get("gpu__time_duration.sum", 0).replace(",", ""))
-                fp32_flops = float(k.get("sm__sass_thread_inst_executed_op_ffma_pred_on.sum", 0).replace(",", "")) * 2
-                fp16_flops = float(k.get("sm__sass_thread_inst_executed_op_hfma_pred_on.sum", 0).replace(",", "")) * 2
-                dram_bytes = float(k.get("dram__bytes.sum", 0).replace(",", ""))
-                flops = fp32_flops + fp16_flops
-                if duration_ns > 0 and flops > 0 and dram_bytes > 0:
-                    ai = flops / dram_bytes
-                    throughput_tflops = flops / (duration_ns * 1e-9) / 1e12
-                    points.append({"name": name, "ai": ai, "tflops": throughput_tflops,
-                                   "duration_ms": duration_ns / 1e6, "flops": flops, "bytes": dram_bytes})
-            except (ValueError, KeyError):
+    for k in kernels:
+        try:
+            name = k.get("Kernel Name", "unknown").strip()
+            if not name:
                 continue
+            duration_us = float(k.get("gpu__time_duration.sum", "0").replace(",", ""))
+            fp32_flops = float(k.get(
+                "derived__sm__sass_thread_inst_executed_op_ffma_pred_on_x2", "0"
+            ).replace(",", ""))
+            fp16_flops = float(k.get(
+                "derived__sm__sass_thread_inst_executed_op_hfma_pred_on_x4", "0"
+            ).replace(",", ""))
+            # dram__bytes.sum.per_second is in Gbyte/s; multiply by duration to get total bytes
+            dram_bw_gbps = float(k.get("dram__bytes.sum.per_second", "0").replace(",", ""))
+            duration_s = duration_us * 1e-6
+            dram_bytes = dram_bw_gbps * 1e9 * duration_s
+
+            flops = fp32_flops + fp16_flops
+            if duration_s > 0 and flops > 0 and dram_bytes > 0:
+                ai = flops / dram_bytes
+                throughput_tflops = flops / duration_s / 1e12
+                points.append({
+                    "name": name,
+                    "ai": ai,
+                    "tflops": throughput_tflops,
+                    "duration_ms": duration_us / 1e3,
+                    "flops": flops,
+                    "bytes": dram_bytes,
+                })
+        except (ValueError, KeyError):
+            continue
     return points
 
 
