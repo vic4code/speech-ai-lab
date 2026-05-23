@@ -56,7 +56,7 @@ Each phase is self-contained, documented, and benchmarked against real hardware 
 
 4. **openai-whisper fp16 regresses on Chinese** (0.95×) — long clips produce many decoder steps; FP16 cast overhead > bandwidth savings. Always use faster-whisper CT2 for Chinese ASR.
 
-5. **Roofline explains everything** — at batch=1, ASR arithmetic intensity ≈ 0.5 FLOP/byte, 100× below the A10G ridge (52 FLOP/byte). Every optimization is a bandwidth reduction, not a compute increase.
+5. **Encoder is compute-bound, decoder is memory-bound** — Whisper encoder with T=1500 tokens has AI ≈ 708 FLOP/byte (3.4× above the A10G FP32 ridge). Encoder throughput stays flat from batch=1 to batch=16: GPU compute already saturated. Decoder is matrix-vector (AI ≈ 0.5 FLOP/byte) → memory-bound, benefits from INT8 weight reduction. These are two different bottlenecks.
 
 ---
 

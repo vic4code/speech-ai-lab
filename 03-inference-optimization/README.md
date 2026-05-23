@@ -208,6 +208,43 @@ Attempts `torch_tensorrt.compile()` with:
 
 ---
 
+### Step 8 — Batch Throughput: memory-bound → compute-bound transition
+
+Script: `08_batch_throughput.py`
+
+#### Encoder batch throughput — large-v3 FP32 (zh clips)
+
+| Batch | Mean (ms) | P95 (ms) | Clips/sec | vs B=1 | AI (FLOP/byte) | vs A10G ridge |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 170.3 | 170.6 | 5.87 | 1.00× | 708 | 341% |
+| 2 | 335.0 | 335.6 | 5.97 | 1.02× | 1343 | 646% |
+| 4 | 674.4 | 676.6 | 5.93 | 1.01× | 2430 | 1168% |
+| 8 | 1453.4 | 1473.8 | 5.50 | 0.94× | 4085 | 1964% |
+| 16 | 2748.3 | 2889.2 | 5.82 | 0.99× | 6194 | 2978% |
+
+#### CT2 int8\_float16 sequential throughput (beam=1)
+
+| Lang | n\_clips | Total time | Clips/sec | RTF |
+|---|---:|---:|---:|---:|
+| zh | 20 | 9.7 s | 2.06 | 0.045 |
+| en | 20 | 7.6 s | 2.62 | 0.046 |
+
+> **Critical finding — encoder is COMPUTE-BOUND at batch=1, not memory-bound.**
+>
+> Latency scales linearly with batch (170 ms → 2748 ms ≈ 16×), while throughput stays flat at ~5.8 clips/sec. This is textbook compute-saturation.
+>
+> **Why?** The simple "0.5 FLOP/byte" arithmetic intensity estimate assumed short sequences. Whisper's encoder produces **T=1500 tokens** after its stride-2 convolution. Attention FLOPs scale as O(T²): 4×B×T²×d = 4×1×1500²×1280 ≈ 11.5 GFLOP per encoder layer, comparable to the matmul FLOPs. At B=1: AI ≈ 708 FLOP/byte — **3.4× above the A10G FP32 ridge** (208 FLOP/byte).
+>
+> **Corrected roofline picture:**
+> - **Encoder**: compute-bound (long T=1500 context, quadratic attention FLOPs dominate)
+> - **Decoder**: memory-bound (autoregressive, short sequence, one token per step → matrix-vector)
+>
+> **Implication for optimization**: FP32→FP16→INT8 reduces decoder weight bytes and speeds up decoder. Encoder speedup from quantisation comes from bandwidth savings on FFN weights, but attention FLOPs are already at 3× peak — **tensor core throughput** (FP16 TC: 125 TFLOPS vs FP32: 31.2 TFLOPS) is what unlocks encoder speedup. This explains why float16 gave 2× on the encoder specifically.
+>
+> **Batching does NOT increase encoder throughput** because the GPU compute is already saturated at B=1. To improve throughput, use concurrent instances or a Triton server that pipelines encoder+decoder across requests.
+
+---
+
 ### Step 7 — CUDA Graphs
 
 Script: `07_cuda_graphs.py`
@@ -272,9 +309,13 @@ Script: `07_cuda_graphs.py`
 
 ## Interview Reference Card
 
-### Q: Why is batch=1 ASR inference memory-bound?
+### Q: Is ASR inference memory-bound or compute-bound?
 
-Matrix-vector multiply: one token × full weight matrix. AI ≈ 0.5 FLOP/byte. A10G ridge = 52 FLOP/byte. 100× below ridge → every cycle is spent waiting for DRAM, not computing.
+**It depends on the component:**
+- **Decoder** (autoregressive, one token/step): matrix-vector multiply, AI ≈ 0.5 FLOP/byte. A10G FP32 ridge = 52 FLOP/byte → memory-bound. Reducing weight bytes (FP32→INT8) gives proportional speedup.
+- **Encoder** (Whisper large-v3, T=1500 tokens): attention FLOPs ∝ T² = 11.5 GFLOP/layer. AI ≈ 708 FLOP/byte at batch=1 → already **3.4× above the ridge, compute-bound**. Tensor Core throughput (FP16: 125 TFLOPS vs FP32: 31.2 TFLOPS, 4×) is the lever for encoder speedup — not bandwidth.
+
+**Step 8 data confirms this**: encoder throughput flat at ~5.8 clips/sec from batch=1 to batch=16. Latency scales linearly → compute-saturated at B=1.
 
 ### Q: Why doesn't FP16 give a full 2× speedup?
 
