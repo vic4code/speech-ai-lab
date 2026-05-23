@@ -155,7 +155,10 @@ def bench_whisper(model_name: str, manifest: list[dict], lang: str) -> dict[str,
     del model
     torch.cuda.empty_cache()
 
-    avg_dur = np.mean([m["duration_s"] for m in manifest]) * 1000
+    # Per-clip RTF: divide each timed latency by that clip's own duration
+    bench_durs_ms = [manifest[i]["duration_s"] * 1000 for i in range(BENCH_ITERS)]
+    per_clip_rtf = [lat / dur for lat, dur in zip(latencies, bench_durs_ms)]
+
     if lang == "zh":
         norm_refs = [normalise_zh(r) for r in refs_raw]
         norm_hyps = [normalise_zh(h) for h in all_hyps]
@@ -176,7 +179,7 @@ def bench_whisper(model_name: str, manifest: list[dict], lang: str) -> dict[str,
         "p50_ms": round(float(np.percentile(latencies, 50)), 1),
         "p95_ms": round(float(np.percentile(latencies, 95)), 1),
         "gpu_mb": _peak_gpu_mb(device),
-        "rtf": round(float(np.mean(latencies)) / avg_dur, 4),
+        "rtf": round(float(np.mean(per_clip_rtf)), 4),
         error_label: error,
         "sample_hyp": all_hyps[0][:120],
     }
@@ -227,7 +230,9 @@ def bench_parakeet(manifest: list[dict]) -> dict[str, Any]:
     del model
     torch.cuda.empty_cache()
 
-    avg_dur = np.mean([m["duration_s"] for m in manifest]) * 1000
+    bench_durs_ms = [manifest[i]["duration_s"] * 1000 for i in range(BENCH_ITERS)]
+    per_clip_rtf = [lat / dur for lat, dur in zip(latencies, bench_durs_ms)]
+
     norm_refs = [normalise_en(r) for r in refs_raw]
     norm_hyps = [normalise_en(h) for h in all_hyps]
     wer = compute_wer(norm_refs, norm_hyps)
@@ -241,7 +246,7 @@ def bench_parakeet(manifest: list[dict]) -> dict[str, Any]:
         "p50_ms": round(float(np.percentile(latencies, 50)), 1),
         "p95_ms": round(float(np.percentile(latencies, 95)), 1),
         "gpu_mb": _peak_gpu_mb(device),
-        "rtf": round(float(np.mean(latencies)) / avg_dur, 4),
+        "rtf": round(float(np.mean(per_clip_rtf)), 4),
         "WER%": wer,
         "sample_hyp": all_hyps[0][:120],
     }

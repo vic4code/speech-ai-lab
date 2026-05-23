@@ -1,184 +1,230 @@
 """
-INT8 and mixed-precision benchmarks using faster-whisper (CTranslate2 backend).
+INT8 / mixed-precision benchmark via CTranslate2 (faster-whisper).
 
-How CTranslate2 differs from TensorRT
----------------------------------------
-CTranslate2 is a framework-agnostic, CPU + CUDA inference engine that applies
-static quantization (INT8) and operator fusion at the graph level.  It converts
-models offline to its own binary format and executes fused kernels at runtime.
-It ships as a Python wheel — zero NVIDIA toolchain setup.
+Compute types
+-------------
+float16         : FP16 weights + FP16 activations (already in 02_fp16_benchmark.py,
+                  repeated here as the reference point for INT8 comparison)
+int8_float16    : INT8 weights + FP16 activations — production sweet spot.
+                  Weight loads are 2× faster than float16; activations stay precise.
+int8            : Full INT8 — smallest memory footprint, highest risk of accuracy loss.
 
-TensorRT is NVIDIA's proprietary compiler that takes a neural network graph and
-emits highly optimized CUDA kernels tuned to the exact GPU architecture (e.g.,
-A100 SM80).  It applies layer fusion, kernel auto-tuning, and can use FP8 on
-Hopper.  Build times are long (minutes) but produced engines are fastest on
-the target GPU.
+Why int8_float16 is the sweet spot
+------------------------------------
+Transformer inference at batch=1 is HBM-bandwidth-bound (weight-load dominated).
+INT8 halves bytes-per-weight vs float16, cutting memory bandwidth pressure.
+Accumulation and activations stay in FP16, limiting numerical error.
+Typical outcome: < 0.5 pp CER/WER degradation, ~2× speedup over float16.
 
-What operator fusion does
---------------------------
-Fusing, say, LayerNorm + Projection + GELU into one kernel eliminates multiple
-round-trips to HBM (write result → read it back for the next op) and reduces
-kernel launch overhead.  This is especially impactful for memory-bound,
-sequence-length-bounded transformer inference.
-
-When to use which
+RTF normalisation
 -----------------
-CTranslate2 → rapid deployment, CPU/edge, no NVIDIA dependency required.
-TensorRT    → maximum throughput on a fixed GPU architecture, production serving.
+RTF = mean(latency_i / duration_i) over BENCH_ITERS clips — per-clip, not averaged.
+
+Output
+------
+results/int8_results.json
 """
 
 import json
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from datasets import load_dataset
-from faster_whisper import WhisperModel
-from jiwer import cer
+import torch
 from rich.console import Console
 from rich.table import Table
 
+warnings.filterwarnings("ignore")
+
 console = Console()
 
-WARMUP_ITERS = 10
-BENCH_ITERS = 10
-RESULTS_DIR = Path("results")
+WARMUP = 3
+BENCH_ITERS = 5
+RESULTS_DIR = Path(__file__).parent.parent / "results"
+MANIFEST_ZH = Path(__file__).parent.parent / "data" / "benchmark" / "zh" / "manifest.json"
+MANIFEST_EN = Path(__file__).parent.parent / "data" / "benchmark" / "en" / "manifest.json"
 BASELINE_FILE = RESULTS_DIR / "baseline_results.json"
 FP16_FILE = RESULTS_DIR / "fp16_results.json"
-OUTPUT_FILE = RESULTS_DIR / "ctranslate2_results.json"
 
 COMPUTE_TYPES = ["float16", "int8_float16", "int8"]
-MODEL_NAME = "large-v3"  # benchmark on the full model only
 
 
-def get_test_audio_with_reference() -> tuple[np.ndarray, int, str]:
-    """Return audio array, sample rate, and ground-truth transcript."""
-    ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation[:1]")
-    sample = ds[0]
-    audio = np.array(sample["audio"]["array"], dtype=np.float32)
-    sr: int = sample["audio"]["sampling_rate"]
-    reference: str = sample["text"].strip().lower()
-    return audio, sr, reference
+# ---------------------------------------------------------------------------
+# Shared utilities
+# ---------------------------------------------------------------------------
+
+def load_manifest(path: Path) -> list[dict]:
+    if not path.exists():
+        raise FileNotFoundError(f"Manifest not found: {path}\nRun 00_prepare_data.py first.")
+    return json.loads(path.read_text())
 
 
-def benchmark_compute_type(
-    compute_type: str,
-    audio: np.ndarray,
-    sr: int,
-    reference: str,
-) -> dict[str, Any]:
-    console.print(f"\n[bold cyan]Benchmarking faster-whisper {MODEL_NAME} ({compute_type})[/bold cyan]")
+def normalise_zh(text: str) -> str:
+    import re
+    return re.sub(r"[^一-鿿㐀-䶿＀-￯]", "", text).strip()
 
-    model = WhisperModel(MODEL_NAME, device="cuda", compute_type=compute_type)
 
-    # Warmup
-    console.print(f"  Running {WARMUP_ITERS} warmup iterations ...")
-    for _ in range(WARMUP_ITERS):
-        segments, _ = model.transcribe(audio, language="en")
-        list(segments)  # exhaust generator
+def normalise_en(text: str) -> str:
+    import re
+    return re.sub(r"[^a-zA-Z0-9\s]", "", text).lower().strip()
 
-    # Benchmark
-    console.print(f"  Running {BENCH_ITERS} benchmark iterations ...")
-    latencies_ms: list[float] = []
-    final_text = ""
 
-    for i in range(BENCH_ITERS):
-        t0 = time.perf_counter()
-        segments, _ = model.transcribe(audio, language="en")
-        final_text = " ".join(s.text for s in segments).strip().lower()
-        t1 = time.perf_counter()
-        latencies_ms.append((t1 - t0) * 1000)
-        console.print(f"    iter {i+1:02d}: {latencies_ms[-1]:.1f} ms")
+def compute_wer(refs: list[str], hyps: list[str]) -> float:
+    from jiwer import wer
+    return round(wer(refs, hyps) * 100, 2)
 
-    char_error_rate = cer([reference], [final_text])
 
-    # faster-whisper does not expose torch GPU memory stats directly
-    try:
-        import torch
-        gpu_mem_mb = round(torch.cuda.max_memory_allocated() / (1024**2), 1)
+def compute_cer(refs: list[str], hyps: list[str]) -> float:
+    from jiwer import cer
+    return round(cer(refs, hyps) * 100, 2)
+
+
+def _reset_gpu() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
-    except Exception:
-        gpu_mem_mb = -1.0
+
+
+def _peak_gpu_mb() -> float:
+    if torch.cuda.is_available():
+        return round(torch.cuda.max_memory_allocated() / 1024**2, 1)
+    return 0.0
+
+
+def per_clip_rtf(latencies_ms: list[float], manifest: list[dict]) -> float:
+    durs_ms = [manifest[i]["duration_s"] * 1000 for i in range(len(latencies_ms))]
+    return round(float(np.mean([lat / dur for lat, dur in zip(latencies_ms, durs_ms)])), 4)
+
+
+# ---------------------------------------------------------------------------
+# faster-whisper CTranslate2 benchmark
+# ---------------------------------------------------------------------------
+
+def bench_ct2(
+    model_name: str,
+    compute_type: str,
+    manifest: list[dict],
+    lang: str,
+) -> dict[str, Any]:
+    from faster_whisper import WhisperModel
+
+    console.print(f"\n[bold cyan]faster-whisper {model_name} {compute_type} [{lang}][/bold cyan]")
+
+    model = WhisperModel(model_name, device="cuda", compute_type=compute_type)
+    refs_raw = [m["reference"] for m in manifest]
+
+    for m in manifest[:WARMUP]:
+        segs, _ = model.transcribe(m["audio_path"], language=lang)
+        list(segs)
+
+    _reset_gpu()
+    latencies: list[float] = []
+    for m in manifest[:BENCH_ITERS]:
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        segs, _ = model.transcribe(m["audio_path"], language=lang)
+        list(segs)
+        torch.cuda.synchronize()
+        latencies.append((time.perf_counter() - t0) * 1000)
+
+    all_hyps: list[str] = []
+    for m in manifest:
+        segs, _ = model.transcribe(m["audio_path"], language=lang)
+        all_hyps.append(" ".join(s.text for s in segs).strip())
+
+    gpu_mb = _peak_gpu_mb()
+    del model
+    torch.cuda.empty_cache()
+
+    if lang == "zh":
+        error = compute_cer([normalise_zh(r) for r in refs_raw], [normalise_zh(h) for h in all_hyps])
+        err_key = "CER%"
+    else:
+        error = compute_wer([normalise_en(r) for r in refs_raw], [normalise_en(h) for h in all_hyps])
+        err_key = "WER%"
 
     return {
-        "model": MODEL_NAME,
-        "backend": "ctranslate2",
-        "compute_type": compute_type,
-        "mean_latency_ms": round(float(np.mean(latencies_ms)), 2),
-        "p50_latency_ms": round(float(np.percentile(latencies_ms, 50)), 2),
-        "p95_latency_ms": round(float(np.percentile(latencies_ms, 95)), 2),
-        "gpu_memory_mb": gpu_mem_mb,
-        "cer": round(float(char_error_rate), 4),
+        "model": f"whisper-{model_name}",
+        "backend": "faster-whisper",
+        "precision": compute_type,
+        "lang": lang,
+        "mean_ms": round(float(np.mean(latencies)), 1),
+        "p50_ms": round(float(np.percentile(latencies, 50)), 1),
+        "p95_ms": round(float(np.percentile(latencies, 95)), 1),
+        "gpu_mb": gpu_mb,
+        "rtf": per_clip_rtf(latencies, manifest),
+        err_key: error,
     }
 
 
-def load_prior_results() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    baseline = fp16 = None
-    if BASELINE_FILE.exists():
-        data = json.loads(BASELINE_FILE.read_text())
-        baseline = next((r for r in data if r["model"] == MODEL_NAME), None)
-    if FP16_FILE.exists():
-        data = json.loads(FP16_FILE.read_text())
-        fp16 = next((r for r in data if r["model"] == MODEL_NAME), None)
-    return baseline, fp16
+# ---------------------------------------------------------------------------
+# Comparison table (stacks baseline → fp16 → int8)
+# ---------------------------------------------------------------------------
+
+def load_prior(path: Path) -> list[dict]:
+    if path.exists():
+        return json.loads(path.read_text())
+    return []
 
 
-def print_full_comparison(
-    ct2_results: list[dict[str, Any]],
-    baseline: dict[str, Any] | None,
-    fp16: dict[str, Any] | None,
-) -> None:
-    fp32_lat = baseline["mean_latency_ms"] if baseline else None
+def speedup_str(ref_rtf: float | None, rtf: float) -> str:
+    if ref_rtf and rtf:
+        return f"{ref_rtf / rtf:.2f}×"
+    return "—"
 
-    table = Table(title=f"Full Precision Comparison — {MODEL_NAME}")
-    table.add_column("Backend / Precision", style="bold")
-    table.add_column("P50 (ms)", justify="right")
+
+def print_table(int8_results: list[dict]) -> None:
+    baseline = load_prior(BASELINE_FILE)
+    # Use FP32 baseline RTF as the reference point for speedup calculation
+    fp32_map = {(r["model"], r["lang"]): r["rtf"] for r in baseline}
+
+    table = Table(title="INT8 Quantization — Full Precision Stack (per-clip RTF)", show_lines=True)
+    table.add_column("Model", style="bold")
+    table.add_column("Lang")
+    table.add_column("Precision")
+    table.add_column("Mean (ms)", justify="right")
     table.add_column("P95 (ms)", justify="right")
-    table.add_column("GPU Mem (MB)", justify="right")
-    table.add_column("CER", justify="right")
-    table.add_column("Speedup vs FP32", justify="right", style="green")
+    table.add_column("GPU MB", justify="right")
+    table.add_column("RTF", justify="right")
+    table.add_column("WER/CER%", justify="right")
+    table.add_column("vs FP32", justify="right", style="green")
 
-    def speedup(lat_ms: float) -> str:
-        if fp32_lat:
-            return f"{fp32_lat / lat_ms:.2f}×"
-        return "—"
-
-    def add_row(label: str, r: dict[str, Any], p50_key: str = "mean_latency_ms") -> None:
+    for r in int8_results:
+        fp32_rtf = fp32_map.get((r["model"], r["lang"]))
+        err = r.get("WER%") or r.get("CER%") or "—"
         table.add_row(
-            label,
-            f"{r.get('p50_latency_ms', r.get(p50_key, 0)):.1f}",
-            f"{r.get('p95_latency_ms', 0):.1f}",
-            f"{r.get('gpu_memory_mb', 0):.0f}",
-            f"{r.get('cer', '—')}" if "cer" in r else "—",
-            speedup(r["mean_latency_ms"]),
+            r["model"], r["lang"], r["precision"],
+            str(r["mean_ms"]), str(r["p95_ms"]), str(r["gpu_mb"]),
+            str(r["rtf"]), str(err),
+            speedup_str(fp32_rtf, r["rtf"]),
         )
-
-    if baseline:
-        add_row("PyTorch FP32", baseline)
-    if fp16:
-        add_row("PyTorch FP16", fp16)
-    for r in ct2_results:
-        add_row(f"CT2 {r['compute_type']}", r)
-
     console.print(table)
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main() -> None:
-    audio, sr, reference = get_test_audio_with_reference()
-    console.print(f"Reference transcript: [italic]{reference[:80]}...[/italic]")
+    console.rule("[bold]INT8 / Mixed-Precision Benchmark (CTranslate2)[/bold]")
 
-    ct2_results: list[dict[str, Any]] = []
-    for compute_type in COMPUTE_TYPES:
-        stats = benchmark_compute_type(compute_type, audio, sr, reference)
-        ct2_results.append(stats)
+    manifest_zh = load_manifest(MANIFEST_ZH)
+    manifest_en = load_manifest(MANIFEST_EN)
+    results: list[dict] = []
 
-    baseline, fp16 = load_prior_results()
-    print_full_comparison(ct2_results, baseline, fp16)
+    for model_name in ["large-v3", "large-v3-turbo"]:
+        for ct in COMPUTE_TYPES:
+            results.append(bench_ct2(model_name, ct, manifest_zh, "zh"))
+            results.append(bench_ct2(model_name, ct, manifest_en, "en"))
+
+    print_table(results)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT_FILE.write_text(json.dumps(ct2_results, indent=2))
-    console.print(f"\n[green]Results saved → {OUTPUT_FILE}[/green]")
+    out = RESULTS_DIR / "int8_results.json"
+    out.write_text(json.dumps(results, ensure_ascii=False, indent=2))
+    console.print(f"\n[green]Results saved → {out}[/green]")
 
 
 if __name__ == "__main__":
