@@ -1,0 +1,72 @@
+{
+  "encoder_batch": [
+    {
+      "batch_size": 1,
+      "mean_ms": 170.3,
+      "p95_ms": 170.6,
+      "throughput_clips_per_sec": 5.87,
+      "gpu_util_pct": null,
+      "gpu_mb": 6156.5,
+      "ai_flop_per_byte": 708.5,
+      "lang": "zh"
+    },
+    {
+      "batch_size": 2,
+      "mean_ms": 335.0,
+      "p95_ms": 335.6,
+      "throughput_clips_per_sec": 5.97,
+      "gpu_util_pct": null,
+      "gpu_mb": 6274.5,
+      "ai_flop_per_byte": 1342.7,
+      "lang": "zh"
+    },
+    {
+      "batch_size": 4,
+      "mean_ms": 674.4,
+      "p95_ms": 676.6,
+      "throughput_clips_per_sec": 5.93,
+      "gpu_util_pct": null,
+      "gpu_mb": 6402.6,
+      "ai_flop_per_byte": 2430.4,
+      "lang": "zh"
+    },
+    {
+      "batch_size": 8,
+      "mean_ms": 1453.4,
+      "p95_ms": 1473.8,
+      "throughput_clips_per_sec": 5.5,
+      "gpu_util_pct": null,
+      "gpu_mb": 6731.5,
+      "ai_flop_per_byte": 4085.1,
+      "lang": "zh"
+    },
+    {
+      "batch_size": 16,
+      "mean_ms": 2748.3,
+      "p95_ms": 2889.2,
+      "throughput_clips_per_sec": 5.82,
+      "gpu_util_pct": null,
+      "gpu_mb": 7387.0,
+      "ai_flop_per_byte": 6193.5,
+      "lang": "zh"
+    }
+  ],
+  "ct2_sequential": [
+    {
+      "backend": "ct2_int8_float16_beam1",
+      "lang": "zh",
+      "n_clips": 20,
+      "total_s": 9.7,
+      "throughput_clips_per_sec": 2.06,
+      "rtf": 0.0452
+    },
+    {
+      "backend": "ct2_int8_float16_beam1",
+      "lang": "en",
+      "n_clips": 20,
+      "total_s": 7.64,
+      "throughput_clips_per_sec": 2.62,
+      "rtf": 0.0464
+    }
+  ]
+}

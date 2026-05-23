@@ -1,0 +1,37 @@
+# Placeholder for Phase 7 — production deployment
+# Will define services for:
+#   - FastAPI inference server (api)
+#   - Celery async worker (worker)
+#   - Redis broker
+#   - NVIDIA Triton Inference Server
+#   - Prometheus + Grafana monitoring stack
+version: "3.9"
+
+services:
+  # TODO: Phase 7 — uncomment and configure
+  # api:
+  #   build: ./07-production/api
+  #   runtime: nvidia
+  #   environment:
+  #     - NVIDIA_VISIBLE_DEVICES=all
+  #   ports:
+  #     - "8000:8000"
+
+  # triton:
+  #   image: nvcr.io/nvidia/tritonserver:24.01-py3
+  #   runtime: nvidia
+  #   volumes:
+  #     - ./04-serving/model_repository:/models
+  #   ports:
+  #     - "8001:8001"  # gRPC
+  #     - "8002:8002"  # metrics
+
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   volumes:
+  #     - ./07-production/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+
+  # grafana:
+  #   image: grafana/grafana:latest
+  #   ports:
+  #     - "3000:3000"

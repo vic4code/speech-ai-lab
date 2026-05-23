@@ -1,0 +1,54 @@
+# NeMo experiment configuration for Parakeet CTC fine-tuning
+# Run with: python -m nemo.collections.asr.train model=nemo_config.yaml
+
+name: parakeet-ctc-finetune
+
+model:
+  pretrained_model: nvidia/parakeet-ctc-1.1b
+  encoder:
+    freeze: false
+  decoder:
+    vocabulary: []  # populated from manifest
+
+  train_ds:
+    manifest_filepath: data/clean/train/manifest.json
+    sample_rate: 16000
+    batch_size: 16
+    shuffle: true
+    num_workers: 4
+    pin_memory: true
+
+  validation_ds:
+    manifest_filepath: data/clean/validation/manifest.json
+    sample_rate: 16000
+    batch_size: 16
+    shuffle: false
+    num_workers: 4
+
+  optim:
+    name: adamw
+    lr: 5e-5
+    betas: [0.9, 0.98]
+    weight_decay: 1e-3
+    sched:
+      name: CosineAnnealing
+      warmup_steps: 1000
+      min_lr: 1e-6
+
+trainer:
+  devices: 4
+  accelerator: gpu
+  strategy: ddp
+  max_epochs: 10
+  precision: 16-mixed
+  log_every_n_steps: 50
+  val_check_interval: 0.5
+  gradient_clip_val: 1.0
+
+exp_manager:
+  exp_dir: models/parakeet-ctc
+  name: ${name}
+  create_tensorboard_logger: true
+  create_wandb_logger: false
+  resume_if_exists: true
+  resume_ignore_no_checkpoint: true

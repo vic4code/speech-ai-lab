@@ -1,0 +1,50 @@
+[
+  {
+    "model": "whisper-large-v3",
+    "backend": "inductor/max-autotune",
+    "precision": "int8+fp16",
+    "lang": "zh",
+    "mean_ms": 1286.8,
+    "p50_ms": 1137.3,
+    "p95_ms": 2141.9,
+    "gpu_mb": 6539.8,
+    "rtf": 0.1033,
+    "CER%": 4.14
+  },
+  {
+    "model": "whisper-large-v3",
+    "backend": "inductor/max-autotune",
+    "precision": "int8+fp16",
+    "lang": "en",
+    "mean_ms": 1048.8,
+    "p50_ms": 983.2,
+    "p95_ms": 1828.5,
+    "gpu_mb": 9079.4,
+    "rtf": 0.1013,
+    "WER%": 2.89
+  },
+  {
+    "model": "whisper-large-v3-turbo",
+    "backend": "inductor/max-autotune",
+    "precision": "int8+fp16",
+    "lang": "zh",
+    "mean_ms": 376.8,
+    "p50_ms": 343.1,
+    "p95_ms": 544.7,
+    "gpu_mb": 8223.6,
+    "rtf": 0.031,
+    "CER%": 5.4
+  },
+  {
+    "model": "whisper-large-v3-turbo",
+    "backend": "inductor/max-autotune",
+    "precision": "int8+fp16",
+    "lang": "en",
+    "mean_ms": 340.5,
+    "p50_ms": 324.3,
+    "p95_ms": 477.0,
+    "gpu_mb": 10715.1,
+    "rtf": 0.0387,
+    "WER%": 2.51
+  }
+]

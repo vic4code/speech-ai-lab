@@ -1,0 +1,50 @@
+[
+  {
+    "model": "whisper-large-v3",
+    "backend": "torch.compile/torch_tensorrt",
+    "precision": "fp16",
+    "lang": "zh",
+    "mean_ms": 1245.5,
+    "p50_ms": 1096.1,
+    "p95_ms": 2112.0,
+    "gpu_mb": 6547.1,
+    "rtf": 0.0997,
+    "CER%": 4.14
+  },
+  {
+    "model": "whisper-large-v3",
+    "backend": "torch.compile/torch_tensorrt",
+    "precision": "fp16",
+    "lang": "en",
+    "mean_ms": 1022.9,
+    "p50_ms": 992.9,
+    "p95_ms": 1769.0,
+    "gpu_mb": 6542.7,
+    "rtf": 0.0982,
+    "WER%": 2.78
+  },
+  {
+    "model": "whisper-large-v3-turbo",
+    "backend": "torch.compile/torch_tensorrt",
+    "precision": "fp16",
+    "lang": "zh",
+    "mean_ms": 342.7,
+    "p50_ms": 306.4,
+    "p95_ms": 508.0,
+    "gpu_mb": 3242.0,
+    "rtf": 0.0282,
+    "CER%": 5.4
+  },
+  {
+    "model": "whisper-large-v3-turbo",
+    "backend": "torch.compile/torch_tensorrt",
+    "precision": "fp16",
+    "lang": "en",
+    "mean_ms": 303.9,
+    "p50_ms": 289.4,
+    "p95_ms": 434.7,
+    "gpu_mb": 3239.5,
+    "rtf": 0.034,
+    "WER%": 2.51
+  }
+]

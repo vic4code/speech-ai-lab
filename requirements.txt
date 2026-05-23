@@ -1,0 +1,10 @@
+openai-whisper
+faster-whisper
+datasets
+soundfile
+librosa
+torch
+numpy
+jiwer
+rich
+nvidia-ml-py3
