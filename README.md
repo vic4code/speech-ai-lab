@@ -35,14 +35,16 @@ Each phase is self-contained, documented, and benchmarked against real hardware 
 | 1 FP32 | openai-whisper baseline | en | 0.169 | 2.35% WER | 1.00× |
 | 2 FP16 | faster-whisper float16 | en | 0.068 | 2.57% | 2.48× |
 | 3 INT8 | CT2 int8\_float16 | en | 0.062 | 3.16% | 2.72× |
-| 4 TRT | torch.compile FP16 encoder | en | 0.098 | 2.78% | 1.72× |
+| 4 TRT | torch.compile/torch_tensorrt FP16 encoder | en | 0.098 | 2.78% | 1.72× |
 | **5 beam=1** | **CT2 int8\_float16 greedy** | **en** | **0.045** | **2.94%** | **3.75×** |
+| 6 inductor | torch.compile/inductor max-autotune encoder | en | 0.101 | 2.89% | 1.66× |
 | — | *parakeet-tdt-1.1b (English-only)* | en | 0.019 | 1.60% | *8.80×* |
 | 1 FP32 | openai-whisper baseline | zh | 0.125 | 4.14% CER | 1.00× |
 | 2 FP16 | faster-whisper float16 | zh | 0.062 | 4.08% | 2.02× |
 | 3 INT8 | CT2 int8\_float16 | zh | 0.057 | 4.02% | 2.17× |
-| 4 TRT | torch.compile FP16 encoder | zh | 0.100 | 4.14% | 1.25× |
+| 4 TRT | torch.compile/torch_tensorrt FP16 encoder | zh | 0.100 | 4.14% | 1.25× |
 | **5 beam=1+VAD** | **CT2 int8\_float16 greedy+VAD** | **zh** | **0.044** | **3.83%** | **2.84×** |
+| 6 inductor | torch.compile/inductor max-autotune encoder | zh | 0.103 | 4.14% | 1.21× |
 
 ### Key Findings
 

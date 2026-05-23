@@ -180,13 +180,22 @@ Script: `05_ct2_beam_vad.py` · Model: large-v3 int8\_float16
 
 Script: `06_tensorrt_int8.py`
 
-Uses `torch_tensorrt.compile()` (lower-level API vs `torch.compile`) with:
-- **Explicit `Input` spec**: `min/opt/max = [1, 80, 3000]` — static shape, one engine profile
+Attempts `torch_tensorrt.compile()` with:
+- **Explicit `Input` spec**: `min/opt/max = [1, n_mels, 3000]` — static shape, one engine profile
 - **enabled\_precisions = {FP32, FP16, INT8}** — TRT selects INT8 per-layer where safe
 - **workspace\_size = 8 GiB** — memory budget for kernel tiling search
-- **PTQ** (Post-Training Quantisation) — no calibration dataset; TRT uses weight-distribution heuristics
+- **PTQ** — no calibration dataset; TRT uses weight-distribution heuristics
 
-*Results pending — see `results/trt_int8_results.json` after running the script.*
+**What happened on this system**: `torch_tensorrt.compile()` INT8 is blocked by two constraints: (1) CUDA 13 is not supported by TRT-LLM plugins, and (2) the initial script hardcoded `n_mels=80` but Whisper large-v3 uses `n_mels=128` — TRT's strict shape checking caught the mismatch immediately. Both issues are documented and the script is fixed (`n_mels` now inferred from `encoder.conv1.weight.shape[1]`). Fallback: `torch.compile(mode="max-autotune")`.
+
+#### large-v3 (inductor/max-autotune fallback)
+
+| Lang | Mean (ms) | P95 (ms) | GPU MB | RTF | WER/CER% | vs FP32 | vs Step 4 FP16 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| zh | 1286.8 | 2141.0 | 6539 | 0.1033 | 4.14% CER | 1.21× | −0.04× |
+| en | 1048.8 | 1828.0 | 9079 | 0.1013 | 2.89% WER | 1.66× | −0.06× |
+
+> **Finding**: inductor max-autotune with INT8 in `enabled_precisions` performs comparably (within 5%) to torch_tensorrt FP16 from Step 4. Inductor selects CUDA `mm` over Triton for large matmuls (CUDA cublas wins at FP32 on A10G). True TRT INT8 gain requires CUDA 12.x + calibration dataset; expected 1.8–2.2× vs FP32 based on literature.
 
 **PTQ vs QAT**:
 
@@ -205,17 +214,39 @@ Script: `07_cuda_graphs.py`
 
 `torch.cuda.CUDAGraph` captures the encoder forward pass as a single replayable object. Replay issues the entire sequence of kernels in **one CPU call**, eliminating O(n\_kernels × 5–10 µs) launch overhead.
 
-For Whisper large-v3 encoder (~300 kernels): estimated 1.5–2 ms of launch overhead removed per call.
-
 | Config | Description |
 |---|---|
 | eager | No compilation, no graph — baseline |
-| compile | `torch.compile(mode="max-autotune")` — Triton kernel fusion |
-| compile+graph | Compile + CUDA graph capture — minimum latency |
+| compile | `torch.compile(mode="max-autotune")` — Triton fusion + inductor-internal graph trees |
+| compile+graph | `torch.compile(mode="max-autotune-no-cudagraphs")` + manual `torch.cuda.CUDAGraph` |
 
-**Constraints**: static tensor shapes required; fixed memory addresses (must `copy_()` input into pre-allocated buffer before each replay); no CPU↔GPU sync inside captured region.
+#### Results — encoder isolation (ms)
 
-*Results pending — see `results/cuda_graph_results.json` after running the script.*
+| Model | Lang | Config | Enc mean (ms) | Enc P95 | vs eager |
+|---|---|---|---:|---:|---:|
+| large-v3 | zh | eager | 170.81 | 171.24 | 1.00× |
+| large-v3 | zh | compile | 166.73 | 167.66 | 1.02× |
+| large-v3 | zh | compile+graph | **165.69** | **166.17** | **1.03×** |
+| large-v3 | en | eager | 170.43 | 171.12 | 1.00× |
+| large-v3 | en | compile | 166.60 | 167.60 | 1.02× |
+| large-v3 | en | compile+graph | **166.57** | **167.56** | **1.02×** |
+| large-v3-turbo | zh | eager | 171.64 | 172.38 | 1.00× |
+| large-v3-turbo | zh | compile | 167.02 | 167.54 | 1.03× |
+| large-v3-turbo | zh | compile+graph | **166.21** | **166.64** | **1.03×** |
+| large-v3-turbo | en | eager | 171.38 | 171.84 | 1.00× |
+| large-v3-turbo | en | compile | 167.44 | 168.12 | 1.02× |
+| large-v3-turbo | en | compile+graph | **166.58** | **167.18** | **1.03×** |
+
+> **Key finding — 3% max gain, not the expected 10–15%**: Whisper encoder eager latency is ~171 ms; kernel launch overhead is only ~5 ms (~3%). The encoder is so thoroughly memory-bandwidth-bound that kernel launches are not the bottleneck — DRAM weight reads dominate every cycle.
+>
+> **When CUDA graphs matter**: fast models with many short kernels (e.g., ResNet-50 inference < 5 ms/image), batch=1 serving of MLP-heavy models, or pipelines with hundreds of small ops. For 170 ms memory-bound workloads, a 5 ms CPU-overhead reduction is noise.
+>
+> **large-v3 and large-v3-turbo have identical encoder latency** (~171 ms) because both share the same encoder architecture (128 mel bins, 32 encoder layers, 1280 hidden). The turbo variant removes decoder layers — the encoder is untouched.
+
+**Implementation notes**:
+- `torch.compile(max-autotune)` already uses `cudagraph_trees` internally — you cannot nest `torch.cuda.graph()` on top (raises `cudaErrorStreamCaptureUnsupported`)
+- Use `mode="max-autotune-no-cudagraphs"` to disable inductor's internal graphs before manual capture
+- `torch.compile` does not accept `mode` + `options` simultaneously — use the purpose-built mode string
 
 ---
 
@@ -226,14 +257,16 @@ For Whisper large-v3 encoder (~300 kernels): estimated 1.5–2 ms of launch over
 | 1 FP32 | openai-whisper | en | 0.169 | 2.35% WER | 1.00× |
 | 2 FP16 | faster-whisper float16 | en | 0.068 | 2.57% | 2.48× |
 | 3 INT8 | CT2 int8\_float16 | en | 0.062 | 3.16% | 2.72× |
-| 4 TRT | torch.compile FP16 encoder | en | 0.098 | 2.78% | 1.72× |
+| 4 TRT | torch.compile/torch_tensorrt FP16 encoder | en | 0.098 | 2.78% | 1.72× |
 | **5 beam=1** | **CT2 int8\_float16 greedy** | **en** | **0.045** | **2.94%** | **3.75×** |
+| 6 inductor | torch.compile/inductor max-autotune encoder | en | 0.101 | 2.89% | 1.66× |
 | — Parakeet | NeMo FP32 | en | 0.019 | 1.60% | *8.80×* |
 | 1 FP32 | openai-whisper | zh | 0.125 | 4.14% CER | 1.00× |
 | 2 FP16 | faster-whisper float16 | zh | 0.062 | 4.08% | 2.02× |
 | 3 INT8 | CT2 int8\_float16 | zh | 0.057 | 4.02% | 2.17× |
-| 4 TRT | torch.compile FP16 encoder | zh | 0.100 | 4.14% | 1.25× |
+| 4 TRT | torch.compile/torch_tensorrt FP16 encoder | zh | 0.100 | 4.14% | 1.25× |
 | **5 beam=1+VAD** | **CT2 int8\_float16 greedy+VAD** | **zh** | **0.044** | **3.83%** | **2.84×** |
+| 6 inductor | torch.compile/inductor max-autotune encoder | zh | 0.103 | 4.14% | 1.21× |
 
 ---
 

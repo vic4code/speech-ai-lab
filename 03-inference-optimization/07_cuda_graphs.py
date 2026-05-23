@@ -28,9 +28,19 @@ Decoder is NOT suitable: autoregressive, variable output length.
 
 Three configurations benchmarked
 ----------------------------------
-A. Eager (no compile, no graph)            ← Step 1 baseline
-B. torch.compile(mode="max-autotune")      ← Triton kernel fusion, no graph
-C. torch.compile + CUDA graph replay       ← lowest latency for static encoder
+A. Eager (no compile, no graph)                    ← baseline
+B. torch.compile(max-autotune)                     ← inductor Triton fusion + internal cudagraph_trees
+C. torch.compile(max-autotune-no-cudagraphs)        ← Triton fusion only, no internal graph trees
+   + manual torch.cuda.CUDAGraph replay
+
+Why C uses max-autotune-no-cudagraphs, not max-autotune:
+  torch.compile(max-autotune) enables inductor's cudagraph_trees internally.
+  If we then open torch.cuda.graph() for outer capture, CUDA raises
+  cudaErrorStreamCaptureUnsupported — graph replay inside a capture is illegal.
+  max-autotune-no-cudagraphs keeps the Triton autotuning but disables the
+  internal graph trees, letting us own the capture layer.
+  Note: torch.compile does NOT accept mode + options simultaneously; use
+  the dedicated mode string instead.
 
 The graph is captured once on a "dummy" forward pass (identical shapes to
 production) then replayed for all subsequent calls.
@@ -163,6 +173,12 @@ def bench_with_cuda_graph(
     2. Warmup without graph to initialise lazy modules
     3. Capture: run one forward inside torch.cuda.graph() context
     4. Replay: copy new input into static buffer, call graph.replay()
+
+    NOTE: the encoder must be compiled with triton.cudagraphs=False.
+    torch.compile(max-autotune) enables inductor's internal cudagraph_trees;
+    if we then try to capture an outer graph, CUDA raises
+    cudaErrorStreamCaptureUnsupported because you cannot nest graph captures.
+    Disabling internal graphs lets us own the graph capture layer ourselves.
     """
     # Static buffer — graph captures memory addresses, not values
     static_input = mel_inputs[0].clone()
@@ -212,10 +228,27 @@ def run_configs(model_name: str, manifest: list[dict], lang: str) -> list[dict]:
         model = ow.load_model(model_name, device="cuda")
         model.eval()
 
-        if config in ("compile", "compile+graph"):
+        if config == "compile":
+            # max-autotune: Triton kernel fusion + inductor's internal CUDA graphs
             console.print("  Compiling encoder (max-autotune) …")
             model.encoder = torch.compile(model.encoder, mode="max-autotune")
-            # Trigger compilation
+            dummy = torch.zeros(1, model.dims.n_mels, 3000, device="cuda")
+            for _ in range(3):
+                with torch.no_grad():
+                    model.encoder(dummy)
+            torch.cuda.synchronize()
+            console.print("  Compilation done")
+
+        elif config == "compile+graph":
+            # "max-autotune-no-cudagraphs": same kernel autotuning as
+            # max-autotune but disables inductor's internal cudagraph_trees,
+            # so our outer torch.cuda.CUDAGraph() capture won't conflict.
+            # (mode + options cannot coexist in torch.compile)
+            console.print("  Compiling encoder (max-autotune-no-cudagraphs) …")
+            model.encoder = torch.compile(
+                model.encoder,
+                mode="max-autotune-no-cudagraphs",
+            )
             dummy = torch.zeros(1, model.dims.n_mels, 3000, device="cuda")
             for _ in range(3):
                 with torch.no_grad():

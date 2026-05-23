@@ -1,0 +1,122 @@
+[
+  {
+    "model": "whisper-large-v3",
+    "config": "eager",
+    "lang": "zh",
+    "encoder_mean_ms": 170.81,
+    "encoder_p95_ms": 171.24,
+    "encoder_rtf": 0.0156,
+    "gpu_mb": 6261.2,
+    "CER%": 4.14
+  },
+  {
+    "model": "whisper-large-v3",
+    "config": "compile",
+    "lang": "zh",
+    "encoder_mean_ms": 166.73,
+    "encoder_p95_ms": 167.66,
+    "encoder_rtf": 0.0152,
+    "gpu_mb": 6174.2,
+    "CER%": 4.14
+  },
+  {
+    "model": "whisper-large-v3",
+    "config": "compile+graph",
+    "lang": "zh",
+    "encoder_mean_ms": 165.69,
+    "encoder_p95_ms": 166.17,
+    "encoder_rtf": 0.0151,
+    "gpu_mb": 6255.0,
+    "CER%": 4.14
+  },
+  {
+    "model": "whisper-large-v3",
+    "config": "eager",
+    "lang": "en",
+    "encoder_mean_ms": 170.43,
+    "encoder_p95_ms": 171.12,
+    "encoder_rtf": 0.027,
+    "gpu_mb": 6262.5,
+    "WER%": 2.94
+  },
+  {
+    "model": "whisper-large-v3",
+    "config": "compile",
+    "lang": "en",
+    "encoder_mean_ms": 166.6,
+    "encoder_p95_ms": 167.6,
+    "encoder_rtf": 0.0264,
+    "gpu_mb": 6172.9,
+    "WER%": 3.1
+  },
+  {
+    "model": "whisper-large-v3",
+    "config": "compile+graph",
+    "lang": "en",
+    "encoder_mean_ms": 166.57,
+    "encoder_p95_ms": 167.56,
+    "encoder_rtf": 0.0263,
+    "gpu_mb": 6255.0,
+    "WER%": 2.51
+  },
+  {
+    "model": "whisper-large-v3-turbo",
+    "config": "eager",
+    "lang": "zh",
+    "encoder_mean_ms": 171.64,
+    "encoder_p95_ms": 172.38,
+    "encoder_rtf": 0.0157,
+    "gpu_mb": 3404.6,
+    "CER%": 5.4
+  },
+  {
+    "model": "whisper-large-v3-turbo",
+    "config": "compile",
+    "lang": "zh",
+    "encoder_mean_ms": 167.02,
+    "encoder_p95_ms": 167.54,
+    "encoder_rtf": 0.0152,
+    "gpu_mb": 3314.2,
+    "CER%": 5.4
+  },
+  {
+    "model": "whisper-large-v3-turbo",
+    "config": "compile+graph",
+    "lang": "zh",
+    "encoder_mean_ms": 166.21,
+    "encoder_p95_ms": 166.64,
+    "encoder_rtf": 0.0152,
+    "gpu_mb": 3397.1,
+    "CER%": 5.4
+  },
+  {
+    "model": "whisper-large-v3-turbo",
+    "config": "eager",
+    "lang": "en",
+    "encoder_mean_ms": 171.38,
+    "encoder_p95_ms": 171.84,
+    "encoder_rtf": 0.0271,
+    "gpu_mb": 3404.6,
+    "WER%": 2.51
+  },
+  {
+    "model": "whisper-large-v3-turbo",
+    "config": "compile",
+    "lang": "en",
+    "encoder_mean_ms": 167.44,
+    "encoder_p95_ms": 168.12,
+    "encoder_rtf": 0.0265,
+    "gpu_mb": 3314.2,
+    "WER%": 2.51
+  },
+  {
+    "model": "whisper-large-v3-turbo",
+    "config": "compile+graph",
+    "lang": "en",
+    "encoder_mean_ms": 166.58,
+    "encoder_p95_ms": 167.18,
+    "encoder_rtf": 0.0263,
+    "gpu_mb": 3397.1,
+    "WER%": 2.51
+  }
+]
