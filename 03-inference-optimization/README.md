@@ -329,6 +329,8 @@ With `--launch-skip 10 --launch-count 100`, ncu captured the **input data prepro
 
 These kernels are deeply memory-bound (AI ≈ 0.001 FLOP/byte vs A10G ridge at 52 FLOP/byte) and achieve **~60% of peak memory bandwidth** (364 / 600 GB/s) — well-optimised for a copy kernel.
 
+![Per-kernel roofline — input preprocessing kernels](../results/roofline_ncu.png)
+
 > To capture GEMM / attention kernels, increase `--launch-skip` to ≥ 500 to skip past the input preprocessing window. Those kernels are expected to land in the compute-bound region (AI ≫ 208 FLOP/byte), consistent with the Step 8 batch throughput analysis.
 
 #### Estimated roofline — encoder vs decoder operating points
@@ -341,6 +343,8 @@ The estimated roofline (derived from Steps 1–8 measurements) shows the two ope
 | Decoder (FP32, B=1) | 0.5 | 100× below ridge | **memory-bound** |
 
 The encoder sits well into the compute-bound plateau — **tensor core throughput** (FP16: 125 TFLOPS, 4×) is the lever. The decoder sits on the memory-bound slope — **weight byte reduction** (FP32→INT8) gives proportional speedup.
+
+![Estimated roofline — encoder compute-bound, decoder memory-bound](../results/roofline_estimated.png)
 
 > **ERR_NVGPUCTRPERM note**: AWS EC2 requires `sudo ncu` for hardware performance counter access. Setting `perf_event_paranoid=0` alone is insufficient — the NVIDIA kernel module requires root privileges on cloud instances.
 
